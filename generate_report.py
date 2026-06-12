@@ -2,14 +2,13 @@
 
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.colors import HexColor, black, white
+from reportlab.lib.colors import HexColor, white
 from reportlab.lib.units import inch
-from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
+from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
     PageBreak, HRFlowable,
 )
-from reportlab.lib import colors
 from datetime import datetime
 
 
@@ -436,11 +435,11 @@ def build_report(output_path: str = "reports/phase1_validation_report.pdf"):
     story.append(Paragraph("Roadmap", styles['SectionHead']))
     roadmap_data = [
         ['Phase', 'Target', 'Engine', 'Timeline', 'Status'],
-        ['Phase 1', 'Skill files (SKILL.md)', 'DSPy + GEPA', '3-4 weeks', 'Validated ✓'],
-        ['Phase 2', 'Tool descriptions', 'DSPy + GEPA', '2-3 weeks', 'Planned'],
-        ['Phase 3', 'System prompt sections', 'DSPy + GEPA', '2-3 weeks', 'Planned'],
-        ['Phase 4', 'Tool implementation code', 'Darwinian Evolver', '3-4 weeks', 'Planned'],
-        ['Phase 5', 'Continuous improvement', 'Automated pipeline', '2 weeks', 'Planned'],
+        ['Phase 1', 'Skill files (SKILL.md)', 'DSPy + GEPA', '3-4 weeks', 'Implemented ✓'],
+        ['Phase 2', 'Tool descriptions', 'DSPy + GEPA', '2-3 weeks', 'Implemented ✓'],
+        ['Phase 3', 'System prompt sections', 'DSPy + GEPA', '2-3 weeks', 'Implemented ✓'],
+        ['Phase 4', 'Tool implementation code', 'Internal/Evolver', '3-4 weeks', 'Implemented ✓'],
+        ['Phase 5', 'Continuous improvement', 'Orchestrator v1.0', '2 weeks', 'Implemented ✓'],
     ]
     roadmap_table = Table(roadmap_data, colWidths=[0.9 * inch, 1.6 * inch, 1.3 * inch, 1.0 * inch, 1.0 * inch])
     roadmap_table.setStyle(TableStyle([

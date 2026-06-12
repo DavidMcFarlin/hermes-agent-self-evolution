@@ -1,9 +1,8 @@
 """Configuration and hermes-agent repo discovery."""
 
 import os
-from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional
+from pathlib import Path
 
 
 @dataclass
@@ -22,6 +21,23 @@ class EvolutionConfig:
     eval_model: str = "openai/gpt-4.1-mini"  # Model for LLM-as-judge scoring
     judge_model: str = "openai/gpt-4.1"  # Model for dataset generation
 
+    # PR #5: Configurable cost cap
+    # Previously hardcoded at $10. Now configurable per-deployment.
+    # For multi-group setups, the cap scales with group count but has a max.
+    max_cost_per_run_usd: float = 10.00
+    cost_per_1k_tokens: dict = field(default_factory=lambda: {
+        "gpt-4.1": 0.005,
+        "openai/gpt-4.1": 0.005,
+        "gpt-4.1-mini": 0.0006,
+        "openai/gpt-4.1-mini": 0.0006,
+        "gpt-4o": 0.005,
+        "openai/gpt-4o": 0.005,
+        "gpt-4o-mini": 0.0006,
+        "openai/gpt-4o-mini": 0.0006,
+        "gpt-3.5-turbo": 0.002,
+        "openai/gpt-3.5-turbo": 0.002,
+    })
+
     # Constraints
     max_skill_size: int = 15_000  # 15KB default
     max_tool_desc_size: int = 500  # chars
@@ -34,6 +50,15 @@ class EvolutionConfig:
     val_ratio: float = 0.25
     holdout_ratio: float = 0.25
 
+    # PR #4: Multi-group session filtering
+    # Only mine sessions from these groups. Empty = all groups.
+    # Format: list of chat_ids (e.g., ["-1001234567890", "-1009998887777"])
+    target_groups: list = field(default_factory=list)
+    
+    # Exclude specific groups from mining (privacy / isolation)
+    # Baked in BLR equivalent for any deployment
+    excluded_groups: list = field(default_factory=list)
+
     # Benchmark gating
     run_pytest: bool = True
     run_tblite: bool = False  # Expensive — opt-in
@@ -43,30 +68,71 @@ class EvolutionConfig:
     output_dir: Path = field(default_factory=lambda: Path("./output"))
     create_pr: bool = True
 
+    # Phase 0 hardening
+    phase0_enforce: bool = True
+    max_phase_budget_usd: float = 25.0
+    max_phase_runtime_minutes: int = 120
+    minimum_detectable_effect: float = 0.02
+    required_stable_runs: int = 3
 
-def get_hermes_agent_path() -> Path:
+    # Phase 1 gate
+    phase1_min_relative_gain: float = 0.10
+    phase1_min_absolute_gain: float = 0.03
+    phase1_max_benchmark_regression: float = 0.02
+    phase1_require_reproducibility_manifest: bool = True
+    phase1_require_zero_safety_incidents: bool = True
+    minimum_model_families: int = 3
+
+
+def _candidate_hermes_paths() -> list[Path]:
+    """Return candidate hermes-agent locations in priority order."""
+    env_path = os.getenv("HERMES_AGENT_REPO")
+    candidates: list[Path] = []
+    if env_path:
+        candidates.append(Path(env_path).expanduser())
+
+    repo_root = Path(__file__).resolve().parents[2]
+    candidates.extend(
+        [
+            Path.home() / ".hermes" / "hermes-agent",
+            repo_root / "hermes-agent",
+            repo_root.parent / "hermes-agent",
+            Path.cwd() / "hermes-agent",
+        ],
+    )
+    return candidates
+
+
+def discover_hermes_agent_path() -> Path | None:
+    """Discover the hermes-agent path without raising."""
+    for candidate in _candidate_hermes_paths():
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def get_hermes_agent_path(*, strict: bool = False) -> Path:
     """Discover the hermes-agent repo path.
 
     Priority:
     1. HERMES_AGENT_REPO env var
     2. ~/.hermes/hermes-agent (standard install location)
-    3. ../hermes-agent (sibling directory)
+    3. repo-local ./hermes-agent
+    4. repo sibling ../hermes-agent
+    5. ./hermes-agent from current working directory
+
+    Args:
+        strict: If True, raise when not found. If False, return the
+            default ~/.hermes/hermes-agent path even when missing.
     """
-    env_path = os.getenv("HERMES_AGENT_REPO")
-    if env_path:
-        p = Path(env_path).expanduser()
-        if p.exists():
-            return p
+    discovered = discover_hermes_agent_path()
+    if discovered:
+        return discovered
 
-    home_path = Path.home() / ".hermes" / "hermes-agent"
-    if home_path.exists():
-        return home_path
+    if strict:
+        raise FileNotFoundError(
+            "Cannot find hermes-agent repo. Set HERMES_AGENT_REPO env var "
+            "or ensure it exists at ~/.hermes/hermes-agent",
+        )
 
-    sibling_path = Path(__file__).parent.parent.parent / "hermes-agent"
-    if sibling_path.exists():
-        return sibling_path
-
-    raise FileNotFoundError(
-        "Cannot find hermes-agent repo. Set HERMES_AGENT_REPO env var "
-        "or ensure it exists at ~/.hermes/hermes-agent"
-    )
+    return Path.home() / ".hermes" / "hermes-agent"

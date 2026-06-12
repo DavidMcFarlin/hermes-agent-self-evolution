@@ -54,10 +54,10 @@ python -m evolution.skills.evolve_skill \
 | Phase | Target | Engine | Status |
 |-------|--------|--------|--------|
 | **Phase 1** | Skill files (SKILL.md) | DSPy + GEPA | ✅ Implemented |
-| **Phase 2** | Tool descriptions | DSPy + GEPA | 🔲 Planned |
-| **Phase 3** | System prompt sections | DSPy + GEPA | 🔲 Planned |
-| **Phase 4** | Tool implementation code | Darwinian Evolver | 🔲 Planned |
-| **Phase 5** | Continuous improvement loop | Automated pipeline | 🔲 Planned |
+| **Phase 2** | Tool descriptions | DSPy + GEPA | ✅ Implemented |
+| **Phase 3** | System prompt sections | DSPy + GEPA | ✅ Implemented |
+| **Phase 4** | Tool implementation code | Darwinian Evolver / Internal | ✅ Implemented |
+| **Phase 5** | Continuous improvement loop | Autonomous Orchestrator | ✅ Implemented (v1.0) |
 
 ## Engines
 
