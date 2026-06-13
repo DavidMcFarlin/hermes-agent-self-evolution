@@ -16,13 +16,16 @@ fi
 
 # Load environment variables if .env exists
 if [ -f ".env" ]; then
-    export $(grep -v '^#' .env | xargs)
+    set -a
+    source .env
+    set +a
 fi
 
-# Mandatory environment variables check (unless dry-run)
-if [[ "${1:-}" != "--help" ]]; then
-    : "${HERMES_AGENT_REPO:?HERMES_AGENT_REPO must be set (e.g. export HERMES_AGENT_REPO=~/.hermes/hermes-agent)}"
+# --help never starts a run; everything else requires the agent repo
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    exec $PYTHON -m evolution.monitor.loop --help
 fi
+: "${HERMES_AGENT_REPO:?HERMES_AGENT_REPO must be set (e.g. export HERMES_AGENT_REPO=~/.hermes/hermes-agent)}"
 
 echo "=== 🧬 Hermes Self-Evolution v1.0 Master Loop ==="
 echo "Started: $(date)"

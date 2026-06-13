@@ -8,6 +8,7 @@ import json
 import sqlite3
 import os
 import re
+import sys
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
@@ -87,8 +88,10 @@ class PerformanceTriage:
                         potential_failures += 1
                 
                 conn.close()
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as e:
+                # A schema mismatch here would silently zero out usage stats
+                print(f"warning: could not query session DB {self.session_db}: {e}",
+                      file=sys.stderr)
 
         # 2. Check JSON session dumps
         if self.session_dir.exists():

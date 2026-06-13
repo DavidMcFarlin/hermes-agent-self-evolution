@@ -4,10 +4,12 @@ Coordinates triage, optimization, and reporting into a single
 automated workflow that covers all 5 phases of evolution.
 """
 
+import argparse
 import json
 import subprocess
 import sys
 import os
+import time
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any
@@ -22,8 +24,9 @@ console = Console()
 class EvolutionLoop:
     """Orchestrates the full end-to-end self-evolution cycle."""
 
-    def __init__(self, config: EvolutionConfig):
+    def __init__(self, config: EvolutionConfig, max_targets: int = 5):
         self.config = config
+        self.max_targets = max_targets
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.log_dir = Path("logs") / f"loop_{self.timestamp}"
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -71,27 +74,38 @@ class EvolutionLoop:
             "--iterations", str(self.config.iterations),
             "--eval-source", "synthetic" # Default to synthetic for stability in the loop
         ]
-        
+
         # If running on a system with limited models, allow two-family mode
-        if getattr(self.config, "allow_two_family_mode", True):
+        if self.config.allow_two_family_mode:
             cmd.append("--allow-two-family-mode")
 
         # Log to file
-        log_file = self.log_dir / f"{artifact_type}_{name}.log"
+        log_file = self.log_dir / f"{artifact_type}_{name.replace(':', '__')}.log"
+        run_started = time.time()
         with open(log_file, "w") as f:
             result = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, text=True)
-        
+
         success = result.returncode == 0
-        
-        # Try to find metrics from the output directory
+
+        # Each phase module writes metrics to a different output subtree
+        if artifact_type == "tool":
+            output_dir = Path("output") / "tools" / name
+        elif artifact_type == "prompt":
+            output_dir = Path("output") / "prompts" / name.replace(":", "__")
+        else:
+            output_dir = Path("output") / name
+
+        # Only accept metrics written by this run, never a previous one
         metrics = {}
-        output_dir = Path("output") / name
         if output_dir.exists():
-            runs = sorted(output_dir.glob("*/metrics.json"))
+            runs = sorted(
+                p for p in output_dir.glob("*/metrics.json")
+                if p.stat().st_mtime >= run_started
+            )
             if runs:
                 try:
                     metrics = json.loads(runs[-1].read_text())
-                except:
+                except (json.JSONDecodeError, OSError):
                     pass
         
         return {
@@ -113,6 +127,9 @@ class EvolutionLoop:
         
         # 1. Triage
         targets = self.run_triage()
+        # Zero priority means no usage evidence — evolving it would burn
+        # API budget on an arbitrary target
+        targets = [t for t in targets if t.get("priority_score", 0) > 0]
         if not targets:
             console.print("[yellow]No targets identified. Loop complete.[/yellow]")
             return
@@ -120,8 +137,7 @@ class EvolutionLoop:
         # 2. Evolve
         results = []
         # Process a mix of types if possible
-        max_targets = 5
-        for target in targets[:max_targets]:
+        for target in targets[:self.max_targets]:
             res = self.evolve_target(target)
             results.append(res)
 
@@ -148,7 +164,8 @@ class EvolutionLoop:
         
         for r in results:
             status = "✅ Success" if r["success"] and r["improvement"] > 0 else "❌ Failed/No-op"
-            improvement = f"{r['improvement']:+.1%}" if r["success"] else "N/A"
+            # improvement is an absolute fitness-score delta, not a percentage
+            improvement = f"{r['improvement']:+.3f}" if r["success"] else "N/A"
             lines.append(f"| {r['name']} | {r['type']} | {status} | {improvement} |")
             
         lines.append("")
@@ -159,9 +176,27 @@ class EvolutionLoop:
         report_path.write_text("\n".join(lines))
         console.print(f"\n[bold green]✓ v1.0 Loop complete! Master report saved to {report_path}[/bold green]")
 
-if __name__ == "__main__":
+def main():
+    parser = argparse.ArgumentParser(
+        prog="python -m evolution.monitor.loop",
+        description="Run the autonomous self-evolution loop: triage, evolve, report.",
+    )
+    parser.add_argument(
+        "--iterations", type=int,
+        default=int(os.environ.get("EVOLUTION_ITERATIONS", 1)),
+        help="Optimization iterations per target (default: $EVOLUTION_ITERATIONS or 1)",
+    )
+    parser.add_argument(
+        "--max-targets", type=int, default=5,
+        help="Maximum number of triage targets to evolve per run (default: 5)",
+    )
+    args = parser.parse_args()
+
     config = EvolutionConfig()
-    # Default iterations to 1 for loop speed if not specified
-    config.iterations = int(os.environ.get("EVOLUTION_ITERATIONS", 1))
-    loop = EvolutionLoop(config)
+    config.iterations = args.iterations
+    loop = EvolutionLoop(config, max_targets=args.max_targets)
     loop.run()
+
+
+if __name__ == "__main__":
+    main()

@@ -16,6 +16,10 @@ class EvolutionConfig:
     iterations: int = 10
     population_size: int = 5
 
+    # Allow runs with only two distinct model families (for systems with
+    # limited model access); passed through to phase modules by the loop
+    allow_two_family_mode: bool = True
+
     # LLM configuration
     optimizer_model: str = "openai/gpt-4.1"  # Model for GEPA reflections
     eval_model: str = "openai/gpt-4.1-mini"  # Model for LLM-as-judge scoring
