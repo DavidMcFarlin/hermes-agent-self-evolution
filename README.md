@@ -47,7 +47,28 @@ python -m evolution.skills.evolve_skill \
     --skill github-code-review \
     --iterations 10 \
     --eval-source sessiondb
+
+# Use the LLM-as-judge fitness metric (richer signal than keyword overlap)
+# and deliver a passing improvement to a new branch in your hermes-agent repo:
+python -m evolution.skills.evolve_skill \
+    --skill github-code-review \
+    --iterations 10 \
+    --metric judge \
+    --deliver           # add --open-pr to also push + open a PR via `gh`
 ```
+
+### Fitness metrics
+
+`--metric` selects how candidates are scored (skills and prompt sections):
+
+| Value | Cost | What it measures |
+|-------|------|------------------|
+| `overlap` (default) | free | Keyword coverage vs. the rubric — fast inner-loop proxy |
+| `judge` | LLM call | LLM-as-judge rates correctness/procedure on 0–1 with feedback |
+| `hybrid` | LLM call | `judge` blended with a 0.3 keyword-overlap fallback |
+
+GEPA always receives **score + feedback** (not a bare float) so its reflective
+mutation has something to reason about.
 
 ## What It Optimizes
 
@@ -69,11 +90,24 @@ python -m evolution.skills.evolve_skill \
 ## Guardrails
 
 Every evolved variant must pass:
-1. **Full test suite** — `pytest tests/ -q` must pass 100%
-2. **Size limits** — Skills ≤15KB, tool descriptions ≤500 chars
-3. **Caching compatibility** — No mid-conversation changes
+1. **Phase gate + holdout** — must show a real, gated improvement on a held-out split before it can be delivered
+2. **Size & growth limits** — Skills ≤15KB, tool descriptions ≤500 chars, bounded growth over baseline
+3. **Cost cap** — real per-model token spend is metered (`dspy.track_usage`) and checked against `max_cost_per_run_usd`; over-budget variants are not delivered
 4. **Semantic preservation** — Must not drift from original purpose
-5. **PR review** — All changes go through human review, never direct commit
+5. **Full test suite on apply** — `--deliver` writes the variant into a throwaway `git worktree` and runs the hermes-agent test suite there; a failing suite discards the branch
+6. **PR review** — delivery only ever creates a **branch**; pushing/opening a PR is opt-in (`--open-pr` via the `gh` CLI), so nothing reaches `main` without human review
+
+## Delivery
+
+Delivery closes the loop the diagram shows. It is layered so the
+outward-facing parts are opt-in:
+
+- `--deliver` — apply the evolved artifact to a new branch in `HERMES_AGENT_REPO`
+  (local only), gated by the phase result, cost cap, and the repo's own test
+  suite. Nothing is pushed.
+- `--open-pr` — additionally push the branch and open a PR via `gh`.
+
+Without `--deliver`, a run stops at `output/` exactly as before.
 
 ## Full Plan
 

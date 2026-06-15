@@ -19,11 +19,11 @@ A Linux ``bwrap`` / ``podman`` backend is intentionally left as a future
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)

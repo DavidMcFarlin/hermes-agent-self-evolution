@@ -17,11 +17,10 @@ Usage:
 """
 
 import json
-import sqlite3
 import re
-from datetime import datetime, timedelta
+import sqlite3
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Dict, List, Optional
 
 HERMES_HOME = Path.home() / ".hermes"
 SESSION_DB = HERMES_HOME / "sessions.db"

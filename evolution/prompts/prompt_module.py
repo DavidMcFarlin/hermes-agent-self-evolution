@@ -78,6 +78,25 @@ def behavioral_fitness_metric(example: dspy.Example, prediction: dspy.Prediction
     return 0.3 + 0.7 * overlap
 
 
+def behavioral_feedback(example: dspy.Example, prediction: dspy.Prediction) -> str:
+    """Actionable feedback for GEPA derived from rubric-keyword coverage."""
+    output = (getattr(prediction, "output", "") or "").strip()
+    if not output:
+        return "The response was empty. Rewrite the section so it forces a concrete, on-task response."
+    expected = (getattr(example, "expected_behavior", "") or "").lower()
+    expected_words = {w for w in expected.split() if len(w) > 3}
+    if not expected_words:
+        return "No rubric keywords to check; response was non-empty."
+    missing = sorted(expected_words - set(output.lower().split()))
+    if not missing:
+        return "Response exhibited all expected behavioral concepts from the rubric."
+    return (
+        "Response is missing expected behavioral concepts: "
+        + ", ".join(missing[:12])
+        + ". Revise the prompt section so the agent reliably exhibits these."
+    )
+
+
 class _BehavioralJudgeSignature(dspy.Signature):
     """Score how well an agent response exhibits the expected behavior.
 

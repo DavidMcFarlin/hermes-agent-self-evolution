@@ -1,9 +1,8 @@
 """Session data governance and redaction pipeline."""
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-import re
-
 
 SENSITIVE_PATTERNS = re.compile(
     r"("

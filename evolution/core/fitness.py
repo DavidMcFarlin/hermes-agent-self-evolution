@@ -4,9 +4,10 @@ Uses LLM-as-judge with rubrics to score agent outputs.
 Supports length penalties and multi-dimensional scoring.
 """
 
-import dspy
 from dataclasses import dataclass
 from typing import Optional
+
+import dspy
 
 from evolution.core.config import EvolutionConfig
 
@@ -151,3 +152,111 @@ def _parse_score(value) -> float:
         return min(1.0, max(0.0, float(str(value).strip())))
     except (ValueError, TypeError):
         return 0.5  # Default to neutral on parse failure
+
+
+# ============================================================
+# GEPA-aware metrics
+#
+# GEPA's reflective mutation needs *feedback*, not just a scalar. A metric that
+# returns a bare float gives GEPA nothing to reason about ("got 0.4" → mutate
+# blindly). The helpers below return ``dspy.Prediction(score=..., feedback=...)``
+# so GEPA can read why a candidate scored the way it did.
+# ============================================================
+
+
+def _expected_keywords(example) -> set:
+    expected = (getattr(example, "expected_behavior", "") or "").lower()
+    return {w for w in expected.split() if len(w) > 3}
+
+
+def skill_overlap_feedback(example, prediction) -> str:
+    """Concrete, actionable feedback for the fast keyword-overlap metric."""
+    output = (getattr(prediction, "output", "") or "").strip()
+    if not output:
+        return "The response was empty. Make the instructions force a concrete answer to the task."
+    expected_words = _expected_keywords(example)
+    if not expected_words:
+        return "No rubric keywords to check; response was non-empty."
+    output_words = set(output.lower().split())
+    missing = sorted(expected_words - output_words)
+    if not missing:
+        return "Response covered all expected concepts from the rubric."
+    return (
+        "Response is missing expected concepts: "
+        + ", ".join(missing[:12])
+        + ". Revise the skill instructions so the agent reliably addresses these."
+    )
+
+
+def make_gepa_metric(float_metric, feedback_fn):
+    """Adapt a plain ``float`` metric into a GEPA feedback metric.
+
+    Returns a callable matching the GEPA 5-arg signature that yields
+    ``dspy.Prediction(score, feedback)``.
+    """
+
+    def _gepa_metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
+        score = float_metric(gold, pred)
+        return dspy.Prediction(score=score, feedback=feedback_fn(gold, pred))
+
+    return _gepa_metric
+
+
+class _SkillJudgeSignature(dspy.Signature):
+    """Judge an agent response against the skill's expected behavior.
+
+    Return a score from 0.0 to 1.0 and concrete, actionable feedback that
+    explains the score and tells the prompt optimizer what the skill
+    instructions should change to score higher next time.
+    """
+
+    task_input: str = dspy.InputField(desc="The task the agent was given")
+    expected_behavior: str = dspy.InputField(desc="Rubric describing a good response")
+    agent_output: str = dspy.InputField(desc="The agent's actual response")
+    skill_text: str = dspy.InputField(desc="The skill/instructions the agent followed")
+    score: str = dspy.OutputField(desc="A single floating point number between 0.0 and 1.0")
+    feedback: str = dspy.OutputField(desc="Actionable feedback for improving the instructions")
+
+
+class SkillJudge:
+    """LLM-as-judge scorer for skills that yields both score and feedback.
+
+    Exposes three call shapes:
+      * ``evaluate`` → ``(score, feedback)`` tuple (the core)
+      * ``score``    → ``float`` (for holdout eval and the MIPROv2 fallback)
+      * ``gepa``     → ``dspy.Prediction(score, feedback)`` (for GEPA)
+    """
+
+    def __init__(self, judge_lm, *, fallback_weight: float = 0.0):
+        self.judge = dspy.Predict(_SkillJudgeSignature)
+        self.judge_lm = judge_lm
+        self.fallback_weight = max(0.0, min(1.0, fallback_weight))
+
+    def evaluate(self, example, prediction) -> tuple[float, str]:
+        output = (getattr(prediction, "output", "") or "").strip()
+        if not output:
+            return 0.0, "The response was empty; make the instructions force a concrete answer."
+        try:
+            with dspy.context(lm=self.judge_lm):
+                result = self.judge(
+                    task_input=getattr(example, "task_input", "") or "",
+                    expected_behavior=getattr(example, "expected_behavior", "") or "",
+                    agent_output=output,
+                    skill_text=getattr(example, "skill_text", "") or "",
+                )
+            score = _parse_score(getattr(result, "score", ""))
+            feedback = str(getattr(result, "feedback", "") or "").strip() or "No feedback provided."
+        except Exception as exc:  # judge LM unavailable → degrade, don't crash
+            score = skill_fitness_metric(example, prediction)
+            feedback = skill_overlap_feedback(example, prediction) + f" (judge error: {exc})"
+        if self.fallback_weight > 0:
+            overlap = skill_fitness_metric(example, prediction)
+            score = (1.0 - self.fallback_weight) * score + self.fallback_weight * overlap
+        return score, feedback
+
+    def score(self, example, prediction, trace=None, pred_name=None, pred_trace=None) -> float:
+        return self.evaluate(example, prediction)[0]
+
+    def gepa(self, gold, pred, trace=None, pred_name=None, pred_trace=None) -> dspy.Prediction:
+        score, feedback = self.evaluate(gold, pred)
+        return dspy.Prediction(score=score, feedback=feedback)

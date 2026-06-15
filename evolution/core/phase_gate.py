@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import json
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from evolution.core.config import EvolutionConfig
 from evolution.core.reproducibility import ReproducibilityManifest
-
 
 REQUIRED_MANIFEST_FIELDS = {
     "generated_at",

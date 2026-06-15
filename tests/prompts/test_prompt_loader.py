@@ -10,7 +10,6 @@ from evolution.prompts.prompt_loader import (
     load_sections_from_file,
 )
 
-
 SAMPLE_PROMPT_BUILDER = dedent(
     '''
     """Sample prompt_builder."""

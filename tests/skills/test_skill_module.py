@@ -2,7 +2,6 @@
 
 from evolution.skills.skill_module import SkillModule, load_skill, reassemble_skill
 
-
 SAMPLE_SKILL = """---
 name: test-skill
 description: A skill for testing things

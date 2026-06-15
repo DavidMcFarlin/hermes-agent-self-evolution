@@ -8,14 +8,17 @@ version = "0.1.0"
 description = "Evolutionary self-improvement for Hermes Agent — optimize skills, prompts, tool descriptions, and code using DSPy + GEPA"
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.10"
+# tomllib (used by the integration adapter) and several typing features
+# require 3.11+. The previous >=3.10 floor would ImportError at runtime.
+requires-python = ">=3.11"
 authors = [
     {name = "Nous Research", email = "team@nousresearch.com"},
 ]
 keywords = ["llm", "optimization", "evolution", "dspy", "gepa", "hermes", "agent"]
 
 dependencies = [
-    "dspy>=3.0.0",
+    # GEPA's max_full_evals kwarg and dspy.track_usage require 3.2+.
+    "dspy>=3.2,<4",
     "openai>=1.0.0",
     "pyyaml>=6.0",
     "click>=8.0",
@@ -25,7 +28,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
-    "pytest-asyncio>=0.21",
+    "ruff>=0.4",
 ]
 darwinian = [
     "darwinian-evolver",
@@ -41,3 +44,18 @@ include = ["evolution*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = [".venv", "evolution_v2"]
+
+[tool.ruff.lint]
+# Pyflakes (F) + a pragmatic subset of pycodestyle/bugbear/isort. Kept
+# conservative so it gates real problems (unused imports/names, bare excepts)
+# without churning the existing style.
+select = ["F", "E9", "B", "I"]
+ignore = [
+    "E722",  # bare except — used intentionally in a few defensive spots
+    "B008",  # function call in default arg (click decorators)
+]

@@ -5,16 +5,25 @@ based on usage frequency and heuristic failure detection.
 """
 
 import json
-import sqlite3
 import os
 import re
+import sqlite3
 import sys
 from pathlib import Path
-from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
+from typing import Any, Dict, List
 
 from evolution.core.config import EvolutionConfig
 from evolution.tools.tool_loader import discover_tool_schemas
+
+# SQL identifiers (table/column names) cannot be passed as bound parameters, so
+# they are validated against this allowlist before interpolation.
+_SQL_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _safe_identifier(name: str, kind: str) -> str:
+    if not _SQL_IDENTIFIER.match(name or ""):
+        raise ValueError(f"unsafe SQL {kind} name: {name!r}")
+    return name
 
 class PerformanceTriage:
     """Identifies and ranks optimization targets from real usage."""
@@ -64,31 +73,37 @@ class PerformanceTriage:
         else: # prompt
             search_pattern = f"%{name}%"
 
-        # 1. Check SQLite DB
+        # 1. Check SQLite DB.
+        # Table/column names are configurable (defaults match Hermes state.db)
+        # and validated as SQL identifiers before interpolation. A single
+        # GROUP BY aggregate replaces the previous per-session N+1 COUNT loop.
         if self.session_db.exists():
             try:
+                table = _safe_identifier(self.config.session_db_table, "table")
+                id_col = _safe_identifier(self.config.session_db_id_column, "column")
+                content_col = _safe_identifier(self.config.session_db_content_column, "column")
+                threshold = int(self.config.triage_long_session_threshold)
+
                 conn = sqlite3.connect(str(self.session_db))
                 cursor = conn.cursor()
-                
-                query = "SELECT session_id, content FROM messages WHERE content LIKE ?"
+
+                query = (
+                    f"SELECT {id_col} AS sid, COUNT(*) AS n "
+                    f"FROM {table} "
+                    f"WHERE {id_col} IN "
+                    f"(SELECT {id_col} FROM {table} WHERE {content_col} LIKE ?) "
+                    f"GROUP BY {id_col}"
+                )
                 cursor.execute(query, (search_pattern,))
-                
-                rows = cursor.fetchall()
-                sessions = set()
-                for row in rows:
-                    sessions.add(row[0])
-                
-                usage_count += len(sessions)
-                
-                # Heuristic failure detection: check session length
-                for session_id in sessions:
-                    cursor.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,))
-                    msg_count = cursor.fetchone()[0]
-                    if msg_count > 15:
+
+                for _sid, msg_count in cursor.fetchall():
+                    usage_count += 1
+                    # Weak signal: long sessions correlate with retries/struggle.
+                    if msg_count and msg_count > threshold:
                         potential_failures += 1
-                
+
                 conn.close()
-            except sqlite3.Error as e:
+            except (sqlite3.Error, ValueError) as e:
                 # A schema mismatch here would silently zero out usage stats
                 print(f"warning: could not query session DB {self.session_db}: {e}",
                       file=sys.stderr)

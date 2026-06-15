@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-
 DEFAULT_PROMPT_BUILDER_RELATIVE_PATH = Path("agent") / "prompt_builder.py"
 
 EVOLVABLE_SECTION_NAMES = (
@@ -74,7 +73,7 @@ def load_sections_from_file(prompt_builder_path: Path) -> list[PromptSection]:
         if target.id == PLATFORM_HINTS_NAME:
             if not isinstance(node.value, ast.Dict):
                 continue
-            for key_node, value_node in zip(node.value.keys, node.value.values):
+            for key_node, value_node in zip(node.value.keys, node.value.values, strict=False):
                 if not isinstance(key_node, ast.Constant) or not isinstance(key_node.value, str):
                     continue
                 text = _eval_string_node(value_node)

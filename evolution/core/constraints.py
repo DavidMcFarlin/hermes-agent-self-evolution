@@ -5,8 +5,8 @@ considered valid. Failed constraints = immediate rejection.
 """
 
 import subprocess
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from evolution.core.config import EvolutionConfig

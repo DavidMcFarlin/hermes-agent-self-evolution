@@ -19,7 +19,6 @@ from evolution.core.dataset_builder import (
     SyntheticDatasetBuilder,
 )
 
-
 SECTION_BEHAVIORAL_BRIEFS: dict[str, str] = {
     "DEFAULT_AGENT_IDENTITY": (
         "Tests whether the agent is helpful, direct, admits uncertainty, and avoids "

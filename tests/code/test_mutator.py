@@ -1,6 +1,6 @@
 """Tests for the mutator module (internal engine only; external is a stub)."""
 
-from evolution.code.mutator import strip_fenced_source, select_engine
+from evolution.code.mutator import select_engine, strip_fenced_source
 
 
 class TestStripFencedSource:
@@ -28,13 +28,13 @@ class TestSelectEngine:
     def test_unknown_raises(self):
         try:
             select_engine("nonexistent", model_name="x")
-            assert False, "should have raised"
+            raise AssertionError("should have raised")
         except ValueError as exc:
             assert "nonexistent" in str(exc)
 
     def test_darwinian_evolver_not_installed_raises(self):
         try:
             select_engine("darwinian-evolver", model_name="x")
-            assert False, "should have raised"
+            raise AssertionError("should have raised")
         except RuntimeError as exc:
             assert "not found" in str(exc).lower()

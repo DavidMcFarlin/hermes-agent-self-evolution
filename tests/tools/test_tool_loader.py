@@ -11,7 +11,6 @@ from evolution.tools.tool_loader import (
     summarize_other_tools,
 )
 
-
 SAMPLE_TOOL_FILE = dedent(
     '''
     """Sample tool file."""

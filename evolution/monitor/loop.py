@@ -6,13 +6,13 @@ automated workflow that covers all 5 phases of evolution.
 
 import argparse
 import json
+import os
 import subprocess
 import sys
-import os
 import time
-from pathlib import Path
 from datetime import datetime
-from typing import List, Dict, Any
+from pathlib import Path
+from typing import Any, Dict, List
 
 from rich.console import Console
 from rich.panel import Panel
@@ -24,6 +24,10 @@ console = Console()
 class EvolutionLoop:
     """Orchestrates the full end-to-end self-evolution cycle."""
 
+    # Hard caps so a hung child process can never wedge the autonomous loop.
+    TRIAGE_TIMEOUT_SECONDS = 600
+    EVOLVE_TIMEOUT_SECONDS = 3600
+
     def __init__(self, config: EvolutionConfig, max_targets: int = 5):
         self.config = config
         self.max_targets = max_targets
@@ -34,10 +38,19 @@ class EvolutionLoop:
     def run_triage(self) -> List[Dict[str, Any]]:
         """Run universal triage to identify targets across all tiers."""
         console.print("[bold yellow]1. Running Universal Performance Triage...[/bold yellow]")
-        
+
         cmd = [sys.executable, "-m", "evolution.monitor.triage"]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=self.TRIAGE_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            console.print(
+                f"[red]✗ Triage timed out after {self.TRIAGE_TIMEOUT_SECONDS}s[/red]"
+            )
+            return []
+
         if result.returncode != 0:
             console.print(f"[red]✗ Triage failed:[/red]\n{result.stderr}")
             return []
@@ -82,10 +95,33 @@ class EvolutionLoop:
         # Log to file
         log_file = self.log_dir / f"{artifact_type}_{name.replace(':', '__')}.log"
         run_started = time.time()
+        timed_out = False
         with open(log_file, "w") as f:
-            result = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, text=True)
+            try:
+                result = subprocess.run(
+                    cmd, stdout=f, stderr=subprocess.STDOUT, text=True,
+                    timeout=self.EVOLVE_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                f.write(f"\n\n[loop] killed: exceeded {self.EVOLVE_TIMEOUT_SECONDS}s timeout\n")
+
+        if timed_out:
+            console.print(
+                f"[red]✗ {artifact_type} '{name}' timed out after "
+                f"{self.EVOLVE_TIMEOUT_SECONDS}s; skipping[/red]"
+            )
+            return {
+                "name": name, "type": artifact_type, "success": False,
+                "improvement": 0.0, "log": str(log_file), "metrics": {},
+            }
 
         success = result.returncode == 0
+        if not success:
+            console.print(
+                f"[red]✗ {artifact_type} '{name}' exited {result.returncode} "
+                f"(see {log_file})[/red]"
+            )
 
         # Each phase module writes metrics to a different output subtree
         if artifact_type == "tool":

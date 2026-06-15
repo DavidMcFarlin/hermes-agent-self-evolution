@@ -15,10 +15,10 @@ result is handed back to the orchestrator.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
 import shutil
 import subprocess
+from dataclasses import dataclass
 from typing import Protocol
 
 import dspy

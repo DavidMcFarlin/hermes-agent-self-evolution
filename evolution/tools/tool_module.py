@@ -123,3 +123,26 @@ def tool_selection_metric(example: dspy.Example, prediction: dspy.Prediction, tr
     if not expected or not predicted:
         return 0.0
     return 1.0 if predicted == expected else 0.0
+
+
+def tool_selection_feedback(example: dspy.Example, prediction: dspy.Prediction) -> str:
+    """Actionable feedback for GEPA on a tool-selection decision."""
+    expected = (getattr(example, "expected_behavior", "") or "").strip().lower()
+    predicted = normalize_decision(getattr(prediction, "decision", None) or getattr(prediction, "output", ""))
+    task = (getattr(example, "task_input", "") or "")[:200]
+    if not predicted:
+        return (
+            f"For task '{task}', the model gave no clear yes/no decision. "
+            "Make the description state plainly when this tool does and does not apply."
+        )
+    if expected and predicted == expected:
+        return f"Correct decision '{predicted}' for task '{task}'."
+    return (
+        f"Wrong selection for task '{task}': expected '{expected}', got '{predicted}'. "
+        + (
+            "Broaden the description so this tool is selected for tasks like this."
+            if expected == "yes"
+            else "Tighten the description so this tool is NOT selected for tasks like this "
+            "(it is stealing selections from a more appropriate peer tool)."
+        )
+    )

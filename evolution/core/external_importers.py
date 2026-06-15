@@ -23,8 +23,8 @@ Usage from evolve_skill.py:
 """
 
 import json
-import re
 import random
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -33,7 +33,7 @@ import dspy
 from rich.console import Console
 from rich.progress import Progress
 
-from evolution.core.dataset_builder import EvalExample, EvalDataset
+from evolution.core.dataset_builder import EvalDataset, EvalExample
 from evolution.core.governance import SessionDataGovernance
 
 console = Console()
@@ -755,7 +755,7 @@ def main(source, skill, output, model, max_examples, dry_run):
         skill_name, skill_text = _load_skill_text(skill)
     except FileNotFoundError as e:
         console.print(f"[red]{e}[/red]")
-        raise SystemExit(1)
+        raise SystemExit(1) from e
 
     console.print(f"  Loaded skill: {skill_name} ({len(skill_text):,} chars)")
 

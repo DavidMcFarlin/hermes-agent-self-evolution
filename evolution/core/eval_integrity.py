@@ -1,10 +1,10 @@
 """Evaluation integrity utilities for Phase 0 hardening."""
 
+import math
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from statistics import mean, stdev
-import math
 
 
 def model_family(model: str) -> str:
@@ -71,7 +71,7 @@ def estimate_effect_size(
     if not baseline_scores:
         raise ValueError("Score arrays must be non-empty")
 
-    deltas = [cand - base for base, cand in zip(baseline_scores, candidate_scores)]
+    deltas = [cand - base for base, cand in zip(baseline_scores, candidate_scores, strict=True)]
     delta_mean = mean(deltas)
     if len(deltas) == 1:
         margin = 0.0

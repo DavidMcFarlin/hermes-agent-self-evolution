@@ -9,8 +9,8 @@ C) Golden sets — hand-curated JSONL files
 import json
 import random
 import re
-from pathlib import Path
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import dspy

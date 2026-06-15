@@ -21,9 +21,11 @@ class EvolutionConfig:
     allow_two_family_mode: bool = True
 
     # LLM configuration
+    # NOTE: these defaults are the single source of truth and must match the
+    # CLI defaults in the phase modules (evolve_skill/evolve_tool/...).
     optimizer_model: str = "openai/gpt-4.1"  # Model for GEPA reflections
     eval_model: str = "openai/gpt-4.1-mini"  # Model for LLM-as-judge scoring
-    judge_model: str = "openai/gpt-4.1"  # Model for dataset generation
+    judge_model: str = "openrouter/google/gemini-2.5-flash"  # Dataset generation
 
     # PR #5: Configurable cost cap
     # Previously hardcoded at $10. Now configurable per-deployment.
@@ -40,6 +42,10 @@ class EvolutionConfig:
         "openai/gpt-4o-mini": 0.0006,
         "gpt-3.5-turbo": 0.002,
         "openai/gpt-3.5-turbo": 0.002,
+        # Dataset-generation / judge model (OpenRouter-hosted Gemini)
+        "google/gemini-2.5-flash": 0.0006,
+        "gemini-2.5-flash": 0.0006,
+        "openrouter/google/gemini-2.5-flash": 0.0006,
     })
 
     # Constraints
@@ -62,6 +68,15 @@ class EvolutionConfig:
     # Exclude specific groups from mining (privacy / isolation)
     # Baked in BLR equivalent for any deployment
     excluded_groups: list = field(default_factory=list)
+
+    # Triage session-DB schema (configurable; defaults match Hermes state.db).
+    # Identifiers are validated before being interpolated into SQL.
+    session_db_table: str = "messages"
+    session_db_id_column: str = "session_id"
+    session_db_content_column: str = "content"
+    # Sessions longer than this are treated as a *weak* signal of a struggling
+    # interaction (more turns ≈ more retries). Heuristic only, not ground truth.
+    triage_long_session_threshold: int = 15
 
     # Benchmark gating
     run_pytest: bool = True

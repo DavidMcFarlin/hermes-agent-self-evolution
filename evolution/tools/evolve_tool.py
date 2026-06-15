@@ -22,7 +22,9 @@ from rich.table import Table
 
 from evolution.core.config import EvolutionConfig
 from evolution.core.constraints import ConstraintValidator
+from evolution.core.cost import CostMeter
 from evolution.core.eval_integrity import validate_model_separation
+from evolution.core.fitness import make_gepa_metric
 from evolution.core.integration_adapter import HermesIntegrationAdapter
 from evolution.core.phase_gate import evaluate_phase2_gate, write_phase_gate_result
 from evolution.core.reproducibility import (
@@ -42,6 +44,7 @@ from evolution.tools.tool_module import (
     ToolDescriptionModule,
     clean_evolved_description,
     normalize_decision,
+    tool_selection_feedback,
     tool_selection_metric,
 )
 
@@ -198,6 +201,15 @@ def evolve(
         console.print("\n[bold green]DRY RUN — setup validated.[/bold green]")
         return
 
+    # ── API-key preflight: fail fast before any spend ──────────────────
+    from evolution.core.preflight import missing_api_keys
+
+    key_errors = missing_api_keys([optimizer_model, eval_model, judge_model])
+    if key_errors:
+        for err in key_errors:
+            console.print(f"[red]✗ {err}[/red]")
+        sys.exit(1)
+
     # ── 2. Build dataset ────────────────────────────────────────────────
     console.print(f"\n[bold]Building tool-selection dataset[/bold] (source: {eval_source})")
     builder = SyntheticToolSelectionBuilder(config)
@@ -235,13 +247,26 @@ def evolve(
     # ── 5. Run optimization ─────────────────────────────────────────────
     console.print(f"\n[bold cyan]Running optimization ({iterations} iterations)...[/bold cyan]\n")
     start_time = time.time()
+    # Only constructor-level failures justify the MIPROv2 fallback; a real bug
+    # in compile() must surface rather than be silently downgraded.
+    use_gepa = True
     try:
-        optimizer = dspy.GEPA(metric=tool_selection_metric, max_steps=iterations)
-        optimized_module = optimizer.compile(baseline_module, trainset=trainset, valset=valset)
-    except Exception as exc:
-        console.print(f"[yellow]GEPA not available ({exc}); falling back to MIPROv2[/yellow]")
+        optimizer = dspy.GEPA(
+            metric=make_gepa_metric(tool_selection_metric, tool_selection_feedback),
+            max_full_evals=iterations,
+            reflection_lm=dspy.LM(model=config.optimizer_model, max_tokens=4096),
+        )
+    except (TypeError, AttributeError, ImportError) as exc:
+        console.print(f"[yellow]GEPA unavailable ({exc}); falling back to MIPROv2[/yellow]")
         optimizer = dspy.MIPROv2(metric=tool_selection_metric, auto="light")
-        optimized_module = optimizer.compile(baseline_module, trainset=trainset)
+        use_gepa = False
+
+    meter = CostMeter(config)
+    with meter.track():
+        if use_gepa:
+            optimized_module = optimizer.compile(baseline_module, trainset=trainset, valset=valset)
+        else:
+            optimized_module = optimizer.compile(baseline_module, trainset=trainset)
     elapsed = time.time() - start_time
     console.print(f"  Optimization completed in {elapsed:.1f}s")
 
@@ -284,16 +309,19 @@ def evolve(
     if not description_changed:
         console.print("[yellow]No description changes produced; reusing baseline scores[/yellow]")
     holdout_examples = dataset.to_dspy_examples("holdout")
-    baseline_scores, evolved_scores, per_peer_delta = _score_holdout(
-        holdout_examples, baseline_module, optimized_module, lm,
-        description_changed=description_changed,
-    )
+    with meter.track():
+        baseline_scores, evolved_scores, per_peer_delta = _score_holdout(
+            holdout_examples, baseline_module, optimized_module, lm,
+            description_changed=description_changed,
+        )
     avg_baseline = sum(baseline_scores) / max(1, len(baseline_scores))
     avg_evolved = sum(evolved_scores) / max(1, len(evolved_scores))
     improvement = avg_evolved - avg_baseline
 
+    actual_cost = meter.total_cost_usd
+    console.print(f"  Measured spend: ${actual_cost:.4f} ({meter.total_tokens:,} tokens)")
     stop_loss.register_attempt(
-        cost_usd=0.0,
+        cost_usd=actual_cost,
         runtime_minutes=elapsed / 60.0,
         improvement=improvement,
         stable=improvement >= config.minimum_detectable_effect,

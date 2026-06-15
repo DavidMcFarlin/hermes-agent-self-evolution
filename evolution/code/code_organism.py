@@ -12,12 +12,12 @@ candidate file is what we drop into the worktree.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from hashlib import sha256
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
+from hashlib import sha256
+from pathlib import Path
 
 
 class OrganismError(RuntimeError):

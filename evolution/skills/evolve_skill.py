@@ -8,16 +8,13 @@ PR #2 + #3 additions: cost cap guardrail + session trace sanitization.
 """
 
 import json
-import logging
 import re
-import sqlite3
 import sys
 import time
-import yaml
 from contextlib import nullcontext
-from pathlib import Path
 from datetime import datetime
-from typing import Optional, List, Dict
+from pathlib import Path
+from typing import Optional
 
 import click
 import dspy
@@ -25,20 +22,25 @@ from rich.console import Console
 from rich.table import Table
 
 from evolution.core.config import EvolutionConfig
-from evolution.core.dataset_builder import SyntheticDatasetBuilder, EvalDataset, GoldenDatasetLoader
-from evolution.core.external_importers import build_dataset_from_external
-from evolution.core.fitness import skill_fitness_metric
-from evolution.core.integration_adapter import HermesIntegrationAdapter
+from evolution.core.constraints import ConstraintValidator
+from evolution.core.dataset_builder import EvalDataset, GoldenDatasetLoader, SyntheticDatasetBuilder
 from evolution.core.eval_integrity import validate_model_separation
+from evolution.core.external_importers import build_dataset_from_external
+from evolution.core.fitness import (
+    SkillJudge,
+    make_gepa_metric,
+    skill_fitness_metric,
+    skill_overlap_feedback,
+)
+from evolution.core.integration_adapter import HermesIntegrationAdapter
 from evolution.core.phase_gate import evaluate_phase1_gate, write_phase_gate_result
 from evolution.core.reproducibility import build_reproducibility_manifest, write_manifest
 from evolution.core.rollout_policy import get_rollout_policy, should_auto_rollback
 from evolution.core.stop_loss import StopLossGuard
-from evolution.core.constraints import ConstraintValidator
 from evolution.skills.skill_module import (
     SkillModule,
-    load_skill,
     find_skill,
+    load_skill,
     reassemble_skill,
 )
 
@@ -46,40 +48,23 @@ console = Console()
 
 
 # ============================================================
-# PR #2: COST CAP GUARDRAIL
+# COST CAP GUARDRAIL
 # Prevents runaway API spending from accidental high-iteration runs.
-# Based on observed token usage from 50+ production runs.
+#
+# Two layers (see evolution/core/cost.py):
+#   1. estimate_evolution_cost() — coarse a-priori gate before any spend.
+#   2. CostMeter — real per-model token accounting fed into the stop-loss
+#      guard and a post-run cap check.
+# The cap and the rate table both come from EvolutionConfig, so there is a
+# single source of truth (no hardcoded per-module constant).
 # ============================================================
 
-MAX_COST_PER_RUN_USD = 10.00
+from evolution.core.cost import CostMeter, estimate_evolution_cost
 
-# Cost per 1K tokens (input+output average), conservative estimate
-TOKEN_COST_PER_1K = {
-    "gpt-4.1": 0.005,
-    "openai/gpt-4.1": 0.005,
-    "gpt-4.1-mini": 0.0006,
-    "openai/gpt-4.1-mini": 0.0006,
-    "gpt-4o": 0.005,
-    "openai/gpt-4o": 0.005,
-    "gpt-4o-mini": 0.0006,
-    "openai/gpt-4o-mini": 0.0006,
-    "gpt-3.5-turbo": 0.002,
-    "openai/gpt-3.5-turbo": 0.002,
-}
 
-def estimate_evolution_cost(iterations: int, model: str = "openai/gpt-4.1-mini") -> float:
-    """Estimate total cost before running evolution.
-    Conservative: 50K tokens per iteration (prompt + completion + judge).
-    """
-    cost_rate = TOKEN_COST_PER_1K.get(model, TOKEN_COST_PER_1K["openai/gpt-4.1-mini"])
-    estimated_tokens = iterations * 50000
-    estimated_cost = (estimated_tokens / 1000) * cost_rate
-    return estimated_cost
-
-def check_cost_cap(iterations: int, model: str) -> bool:
-    """Return True if evolution is within budget."""
-    cost = estimate_evolution_cost(iterations, model)
-    return cost <= MAX_COST_PER_RUN_USD
+def check_cost_cap(iterations: int, model: str, *, cap_usd: float, rates: dict) -> bool:
+    """Return True if the estimated evolution cost is within budget."""
+    return estimate_evolution_cost(iterations, model, rates=rates) <= cap_usd
 
 
 # ============================================================
@@ -133,24 +118,31 @@ def score_holdout_examples(
     lm,
     *,
     evolved_text_changed: bool,
+    metric=None,
 ) -> tuple[list[float], list[float]]:
     """Score baseline/evolved modules on holdout examples.
+
+    ``metric`` is a ``(example, prediction) -> float`` callable. When omitted it
+    defaults to the module-level :func:`skill_fitness_metric` (resolved at call
+    time so it honours monkeypatching in tests). Production callers pass the same
+    metric GEPA optimized against, so the reported KPI matches the objective.
 
     If optimization produced identical skill text, copy baseline scores instead of
     calling the evolved module again. This prevents stochastic LLM generations from
     inventing a fake KPI regression for a no-op optimization pass.
     """
+    score_fn = metric if metric is not None else skill_fitness_metric
     baseline_scores = []
     evolved_scores = []
     for ex in holdout_examples:
         with dspy.context(lm=lm) if lm is not None else nullcontext():
             baseline_pred = baseline_module(task_input=ex.task_input)
-            baseline_score = skill_fitness_metric(ex, baseline_pred)
+            baseline_score = score_fn(ex, baseline_pred)
             baseline_scores.append(baseline_score)
 
             if evolved_text_changed:
                 evolved_pred = optimized_module(task_input=ex.task_input)
-                evolved_score = skill_fitness_metric(ex, evolved_pred)
+                evolved_score = score_fn(ex, evolved_pred)
             else:
                 evolved_score = baseline_score
             evolved_scores.append(evolved_score)
@@ -171,6 +163,9 @@ def evolve(
     dry_run: bool = False,
     allow_two_family_mode: bool = False,
     minimum_model_families: Optional[int] = None,
+    metric_name: str = "overlap",
+    deliver: bool = False,
+    open_pr: bool = False,
 ):
     """Main evolution function — orchestrates the full optimization loop."""
 
@@ -226,28 +221,41 @@ def evolve(
     console.print(f"  Description: {skill['description'][:80]}...")
 
     if dry_run:
-        console.print(f"\n[bold green]DRY RUN — setup validated successfully.[/bold green]")
+        console.print("\n[bold green]DRY RUN — setup validated successfully.[/bold green]")
         console.print(f"  Would generate eval dataset (source: {eval_source})")
         console.print(f"  Would run GEPA optimization ({iterations} iterations)")
-        console.print(f"  Would validate constraints and create PR")
+        console.print("  Would validate constraints and create PR")
         
-        # PR #2: Show cost estimate in dry run
-        est_cost = estimate_evolution_cost(iterations, eval_model)
-        console.print(f"\n  [bold]Cost Estimate:[/bold] ${est_cost:.2f} (cap: ${MAX_COST_PER_RUN_USD})")
-        status = "✓ Within budget" if est_cost <= MAX_COST_PER_RUN_USD else "✗ EXCEEDS CAP"
+        # Show cost estimate in dry run
+        cap = config.max_cost_per_run_usd
+        est_cost = estimate_evolution_cost(iterations, eval_model, rates=config.cost_per_1k_tokens)
+        console.print(f"\n  [bold]Cost Estimate:[/bold] ${est_cost:.2f} (cap: ${cap:.2f})")
+        status = "✓ Within budget" if est_cost <= cap else "✗ EXCEEDS CAP"
         console.print(f"  Status: {status}")
         return
 
-    # ── PR #2: COST CAP GUARDRAIL ──────────────────────────────────────
-    est_cost = estimate_evolution_cost(iterations, eval_model)
-    if not check_cost_cap(iterations, eval_model):
-        console.print(f"\n[red]✗ COST CAP EXCEEDED[/red]")
+    # ── COST CAP GUARDRAIL (a-priori estimate) ─────────────────────────
+    cap = config.max_cost_per_run_usd
+    est_cost = estimate_evolution_cost(iterations, eval_model, rates=config.cost_per_1k_tokens)
+    if not check_cost_cap(iterations, eval_model, cap_usd=cap, rates=config.cost_per_1k_tokens):
+        console.print("\n[red]✗ COST CAP EXCEEDED[/red]")
         console.print(f"  Estimated: ${est_cost:.2f}")
-        console.print(f"  Max allowed: ${MAX_COST_PER_RUN_USD}")
-        console.print(f"  Reduce --iterations or use cheaper --eval-model")
+        console.print(f"  Max allowed: ${cap:.2f}")
+        console.print("  Reduce --iterations or use cheaper --eval-model")
         sys.exit(1)
-    
-    console.print(f"\n  [green]✓[/green] Cost approved: ${est_cost:.2f} ≤ ${MAX_COST_PER_RUN_USD}")
+
+    console.print(f"\n  [green]✓[/green] Cost approved: ${est_cost:.2f} ≤ ${cap:.2f}")
+
+    # ── API-KEY PREFLIGHT ──────────────────────────────────────────────
+    # Fail fast before dataset generation spends anything on a run that would
+    # only die later with a cryptic auth error.
+    from evolution.core.preflight import missing_api_keys
+
+    key_errors = missing_api_keys([optimizer_model, eval_model, judge_model])
+    if key_errors:
+        for err in key_errors:
+            console.print(f"[red]✗ {err}[/red]")
+        sys.exit(1)
 
     # ── 2. Build or load evaluation dataset ─────────────────────────────
     console.print(f"\n[bold]Building evaluation dataset[/bold] (source: {eval_source})")
@@ -313,6 +321,22 @@ def evolve(
     lm = dspy.LM(eval_model)
     dspy.configure(lm=lm)
 
+    # Select the fitness metric. ``metric_fn`` is a plain float metric used for
+    # holdout eval and the MIPROv2 fallback; ``gepa_metric_fn`` is the
+    # feedback-returning variant GEPA needs for reflective mutation.
+    if metric_name == "overlap":
+        metric_fn = skill_fitness_metric
+        gepa_metric_fn = make_gepa_metric(skill_fitness_metric, skill_overlap_feedback)
+        console.print("  Metric: keyword overlap (fast, GEPA gets missing-keyword feedback)")
+    else:
+        judge = SkillJudge(
+            dspy.LM(judge_model),
+            fallback_weight=0.3 if metric_name == "hybrid" else 0.0,
+        )
+        metric_fn = judge.score
+        gepa_metric_fn = judge.gepa
+        console.print(f"  Metric: {metric_name} (LLM-as-judge {judge_model})")
+
     # Create the baseline skill module
     baseline_module = SkillModule(skill["body"])
 
@@ -325,30 +349,34 @@ def evolve(
 
     start_time = time.time()
 
+    # Construct the optimizer first; only constructor-level failures (e.g. a
+    # DSPy version that renamed kwargs, or GEPA not being installed) justify
+    # the MIPROv2 fallback. A genuine bug raised during compile() must NOT be
+    # swallowed and silently downgraded — let it surface.
+    use_gepa = True
     try:
-        # DSPy 3.2+ renamed max_steps; use a reflection model + max_full_evals.
+        # DSPy 3.2+ uses max_full_evals (older versions used max_steps).
         optimizer = dspy.GEPA(
-            metric=skill_fitness_metric,
+            metric=gepa_metric_fn,
             max_full_evals=iterations,
             reflection_lm=dspy.LM(model=config.optimizer_model, max_tokens=4096),
         )
+    except (TypeError, AttributeError, ImportError) as e:
+        console.print(f"[yellow]GEPA unavailable ({e}); falling back to MIPROv2[/yellow]")
+        optimizer = dspy.MIPROv2(metric=metric_fn, auto="light")
+        use_gepa = False
 
-        optimized_module = optimizer.compile(
-            baseline_module,
-            trainset=trainset,
-            valset=valset,
-        )
-    except Exception as e:
-        # Fall back to MIPROv2 if GEPA isn't available in this DSPy version
-        console.print(f"[yellow]GEPA not available ({e}), falling back to MIPROv2[/yellow]")
-        optimizer = dspy.MIPROv2(
-            metric=skill_fitness_metric,
-            auto="light",
-        )
-        optimized_module = optimizer.compile(
-            baseline_module,
-            trainset=trainset,
-        )
+    # Real token metering: everything spent inside this block is accounted for.
+    meter = CostMeter(config)
+    with meter.track():
+        if use_gepa:
+            optimized_module = optimizer.compile(
+                baseline_module,
+                trainset=trainset,
+                valset=valset,
+            )
+        else:
+            optimized_module = optimizer.compile(baseline_module, trainset=trainset)
 
     elapsed = time.time() - start_time
     console.print(f"\n  Optimization completed in {elapsed:.1f}s")
@@ -385,7 +413,7 @@ def evolve(
     evolved_full = reassemble_skill(skill["frontmatter"], evolved_body)
 
     # ── 7. Validate evolved skill ───────────────────────────────────────
-    console.print(f"\n[bold]Validating evolved skill[/bold]")
+    console.print("\n[bold]Validating evolved skill[/bold]")
     # Validate the FULL reassembled skill (frontmatter + body), not just
     # the body. skill_structure check requires YAML frontmatter which only
     # exists after reassemble_skill() prepends it.
@@ -416,23 +444,37 @@ def evolve(
     if not evolved_text_changed:
         console.print("[yellow]No skill text changes produced; reusing baseline holdout scores[/yellow]")
 
-    baseline_scores, evolved_scores = score_holdout_examples(
-        holdout_examples,
-        baseline_module,
-        optimized_module,
-        lm,
-        evolved_text_changed=evolved_text_changed,
-    )
+    with meter.track():
+        baseline_scores, evolved_scores = score_holdout_examples(
+            holdout_examples,
+            baseline_module,
+            optimized_module,
+            lm,
+            evolved_text_changed=evolved_text_changed,
+            metric=metric_fn,
+        )
 
     avg_baseline = sum(baseline_scores) / max(1, len(baseline_scores))
     avg_evolved = sum(evolved_scores) / max(1, len(evolved_scores))
     improvement = avg_evolved - avg_baseline
+
+    # Real measured spend (optimization + holdout), replacing the old 0.0 stub.
+    actual_cost = meter.total_cost_usd
+    console.print(
+        f"  Measured spend: ${actual_cost:.4f} "
+        f"({meter.total_tokens:,} tokens, cap ${cap:.2f})"
+    )
     stop_loss.register_attempt(
-        cost_usd=0.0,
+        cost_usd=actual_cost,
         runtime_minutes=elapsed / 60.0,
         improvement=improvement,
         stable=improvement >= config.minimum_detectable_effect,
     )
+    if actual_cost > cap:
+        console.print(
+            f"[red]✗ Cost cap exceeded after run: ${actual_cost:.2f} > ${cap:.2f}. "
+            f"Variant will not be delivered.[/red]"
+        )
 
     rollout_policy = get_rollout_policy("skill_text")
     rollback = should_auto_rollback(
@@ -554,6 +596,53 @@ def evolve(
         console.print(f"\n[yellow]⚠ Evolution did not improve skill (change: {improvement:+.3f})[/yellow]")
         console.print("  Try: more iterations, better eval dataset, or different optimizer model")
 
+    # ── 11. Deliver the evolved artifact (close the loop) ────────────────
+    # Only deliver a variant that (a) was explicitly opted into, (b) measurably
+    # improved, (c) passed the phase gate, and (d) stayed within the cost cap.
+    should_deliver = (
+        deliver
+        and improvement > 0
+        and gate_result.passed
+        and actual_cost <= cap
+    )
+    if deliver and not should_deliver:
+        console.print(
+            "[yellow]⚠ Skipping delivery: variant did not meet improvement/gate/cost "
+            "criteria.[/yellow]"
+        )
+    elif should_deliver:
+        from evolution.core.delivery import deliver_artifact
+
+        relative_path = str(skill_path.relative_to(config.hermes_agent_path))
+        console.print(f"\n[bold]Delivering evolved skill[/bold] → {relative_path}")
+        delivery = deliver_artifact(
+            hermes_repo=config.hermes_agent_path,
+            relative_path=relative_path,
+            content=evolved_full,
+            commit_message=(
+                f"evolve: improve {skill_name} skill (+{improvement:.3f})\n\n"
+                f"Automated GEPA optimization. Holdout {avg_baseline:.3f} → {avg_evolved:.3f}.\n"
+                f"Reproducibility manifest + phase-1 gate saved under output/.\n\n"
+                f"Co-Authored-By: Hermes Evolution <evolution@hermes.local>"
+            ),
+            run_tests=run_tests,
+            open_pr=open_pr,
+            pr_title=f"evolve: improve {skill_name} skill (+{improvement:.3f})",
+            pr_body=(
+                f"Automated skill evolution for `{skill_name}`.\n\n"
+                f"- Holdout score: {avg_baseline:.3f} → {avg_evolved:.3f} "
+                f"({improvement:+.3f})\n- Metric: {metric_name}\n"
+                f"- Measured spend: ${actual_cost:.4f}\n"
+            ),
+        )
+        color = "green" if delivery.delivered else "yellow"
+        console.print(f"  [{color}]{delivery.message}[/{color}]")
+        if delivery.branch:
+            console.print(f"  Branch: {delivery.branch}")
+        (output_dir / "delivery.json").write_text(
+            json.dumps(delivery.to_dict(), indent=2), encoding="utf-8"
+        )
+
 
 @click.command()
 @click.option("--skill", required=True, help="Name of the skill to evolve")
@@ -582,6 +671,21 @@ def evolve(
     default=None,
     help="Minimum distinct model families required (overrides default/--allow-two-family-mode)",
 )
+@click.option(
+    "--metric", "metric_name", default="overlap", show_default=True,
+    type=click.Choice(["overlap", "judge", "hybrid"]),
+    help="Fitness metric: 'overlap' (fast keyword), 'judge' (LLM-as-judge), "
+         "'hybrid' (judge blended with 0.3 overlap fallback)",
+)
+@click.option(
+    "--deliver", is_flag=True, default=False,
+    help="On a successful, gate-passing improvement, write the evolved skill to a "
+         "new branch in the hermes-agent repo (runs its test suite as a gate).",
+)
+@click.option(
+    "--open-pr", is_flag=True, default=False,
+    help="With --deliver, also push the branch and open a PR via the gh CLI.",
+)
 def main(
     skill,
     iterations,
@@ -595,6 +699,9 @@ def main(
     dry_run,
     allow_two_family_mode,
     minimum_model_families,
+    metric_name,
+    deliver,
+    open_pr,
 ):
     """Evolve a Hermes Agent skill using DSPy + GEPA optimization."""
     evolve(
@@ -610,6 +717,9 @@ def main(
         dry_run=dry_run,
         allow_two_family_mode=allow_two_family_mode,
         minimum_model_families=minimum_model_families,
+        metric_name=metric_name,
+        deliver=deliver,
+        open_pr=open_pr,
     )
 
 

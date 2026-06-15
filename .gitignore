@@ -22,6 +22,20 @@ snapshots/
 # Evolution run artifacts (per-run output trees can be large)
 output/
 
+# Generated run logs, per-repo state, and dated reports (local artifacts).
+# The directories are kept via .gitkeep; their contents are not tracked.
+logs/*
+!logs/.gitkeep
+state/*
+!state/.gitkeep
+reports/*
+!reports/.gitkeep
+
+# Local working notes / one-off patches that shouldn't be in version control
+.evolution_checkpoint
+*.patch
+PAUL_AGENT_STATUS.md
+
 # Windows reserved-name files that occasionally appear as 0-byte stragglers
 NUL
 
